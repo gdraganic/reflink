@@ -134,3 +134,45 @@ func copyFileRange(dst, src *os.File, dstOffset, srcOffset, n int64) (int64, err
 	return int64(resN), err3
 
 }
+
+
+// sparseCopy copies only data extents from src to dst using SEEK_DATA/SEEK_HOLE
+// + copy_file_range. Holes are skipped, preserving sparsity. This matches cp(1)
+// behavior and avoids copying multi-GB zero regions in sparse files.
+func sparseCopy(dst, src *os.File, size int64) error {
+	src.Seek(0, 0)
+	dst.Seek(0, 0)
+	dst.Truncate(0)
+
+	sfd := int(src.Fd())
+	dfd := int(dst.Fd())
+
+	var cursor int64
+	for {
+		dataStart, err := unix.Seek(sfd, cursor, unix.SEEK_DATA)
+		if err != nil {
+			break // no more data extents (ENXIO) or SEEK_DATA unsupported
+		}
+
+		dataEnd, err := unix.Seek(sfd, dataStart, unix.SEEK_HOLE)
+		if err != nil {
+			dataEnd = size
+		}
+
+		srcOff := dataStart
+		dstOff := dataStart
+		for srcOff < dataEnd {
+			chunk := dataEnd - srcOff
+			if chunk > 128<<20 {
+				chunk = 128 << 20
+			}
+			n, err := unix.CopyFileRange(sfd, &srcOff, dfd, &dstOff, int(chunk), 0)
+			if err != nil || n == 0 {
+				return err
+			}
+		}
+		cursor = dataEnd
+	}
+
+	return dst.Truncate(size)
+}
