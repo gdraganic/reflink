@@ -111,27 +111,39 @@ func copyFileRange(dst, src *os.File, dstOffset, srcOffset, n int64) (int64, err
 		return 0, err
 	}
 
-	var resN int
+	var total int64
 	var err2, err3 error
 
 	err = sd.Control(func(dfd uintptr) {
 		err2 = ss.Control(func(sfd uintptr) {
-			// call syscall
-			resN, err3 = unix.CopyFileRange(int(sfd), &srcOffset, int(dfd), &dstOffset, int(n), 0)
+			// copy_file_range transfers at most 0x7ffff000 (2,147,479,552) bytes
+			// per call, and may also perform a short copy for other reasons, so we
+			// loop until all n bytes have been copied. The kernel advances srcOffset
+			// and dstOffset on each call, so we only need to track the remaining count.
+			for rn := n; rn > 0; {
+				var resN int
+				resN, err3 = unix.CopyFileRange(int(sfd), &srcOffset, int(dfd), &dstOffset, int(rn), 0)
+				total += int64(resN)
+				if err3 != nil || resN == 0 {
+					// error, or end of source reached (avoids an infinite loop)
+					break
+				}
+				rn -= int64(resN)
+			}
 		})
 	})
 
 	if err != nil {
 		// sd.Control failed
-		return int64(resN), err
+		return total, err
 	}
 	if err2 != nil {
 		// ss.Control failed
-		return int64(resN), err2
+		return total, err2
 	}
 
-	// err3 is ioctl() response
-	return int64(resN), err3
+	// err3 is the copy_file_range() response
+	return total, err3
 
 }
 
